@@ -19,6 +19,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+var (
+	namespace string
+	directory string
+	verbose   bool
+)
+
 // logsCmd represents the logs command
 var logsCmd = &cobra.Command{
 	Use:   "logs",
@@ -30,41 +36,40 @@ You can specify a different namespace with the -n/--namespace flag.
    salvo logs -n my-namespace
 You can also specify a target directory to write the logs to with the -d/--target-directory flag.
 	salvo logs -n my-namespace -d /tmp/logs
-Or just write to the current directory.
+Or just write to the current directory with them writing to ./logs/<namespace>/.
 	salvo logs
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Gather flags and display them
-		namespace := cmd.Flag("namespace").Value.String()
-		directory := cmd.Flag("directory").Value.String()
-		fmt.Printf("Using namespace \"%s\"\n", namespace)
-		fmt.Printf("Writing to directory \"%s\"\n", directory)
+		namespace, _ = cmd.Flags().GetString("namespace")
+		directory, _ = cmd.Flags().GetString("directory")
+		if directory == "" {
+			directory = "./logs/" + namespace + "/"
+		}
+		verbose, _ = cmd.Flags().GetBool("verbose")
+
+		if verbose {
+			fmt.Printf("Using namespace \"%s\"\n", namespace)
+			fmt.Printf("Writing to directory \"%s\"\n", directory)
+		}
 
 		// Start grabbing Kubernetes information
-		getK8sInfo(namespace)
+		getK8sInfo()
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(logsCmd)
 
-	// Setup any persistent flags
-	logsCmd.PersistentFlags().StringP(
+	// Setup any local flags
+	logsCmd.Flags().StringP(
 		"namespace",
 		"n",
 		"default",
 		"The namespace to get logs from")
-
-	// Setup any local flags
-	// Get the current directory running in as where to place the log files
-	ex, err := os.Executable()
-	if err != nil {
-		panic(err)
-	}
-	exPath := filepath.Dir(ex)
 	logsCmd.Flags().StringP("directory",
 		"d",
-		exPath,
+		"",
 		"The file path to write the logs to")
 }
 
@@ -77,21 +82,17 @@ func handleError(err error) {
 }
 
 // getK8sInfo Assembles the needed parts to get pod logs.
-func getK8sInfo(optionalArgs ...string) {
-	// Set to default namespace if somehow blank
-	namespace := "default"
-	if len(optionalArgs) > 0 {
-		namespace = optionalArgs[0]
+func getK8sInfo() {
+	if verbose {
+		fmt.Printf("Getting Kubernetes pods for namespace %s\n", namespace)
 	}
-
-	fmt.Printf("Getting Kubernetes pods for namespace %s\n", namespace)
-
 	userHomeDir, err := os.UserHomeDir()
 	handleError(err)
 
 	kubeConfigPath := filepath.Join(userHomeDir, ".kube", "config")
-	fmt.Printf("Using kubeconfig: %s\n", kubeConfigPath)
-
+	if verbose {
+		fmt.Printf("Using kubeconfig: %s\n", kubeConfigPath)
+	}
 	kubeConfig, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 	handleError(err)
 
@@ -103,14 +104,18 @@ func getK8sInfo(optionalArgs ...string) {
 
 	// Go through and write all the logs for the pods found
 	for _, pod := range pods.Items {
-		fmt.Printf("Pod name: %s\n", pod.Name)
-		processPodLogs(clientset, namespace, pod, "./logs/"+namespace+"/")
+		if verbose {
+			fmt.Printf("Pod name: %s\n", pod.Name)
+		}
+		processPodLogs(clientset, pod)
 	}
 }
 
 // writeLogs write `.log` files to the directory targeted
-func writeLogs(content string, directory string, pod corev1.Pod) {
-	fmt.Printf("Writing files to directory %s\n", directory)
+func writeLogs(content string, pod corev1.Pod) {
+	if verbose {
+		fmt.Printf("Writing files to directory %s\n", directory)
+	}
 
 	// Check if the directory exists before writing to it, created it if it doesn't
 	if _, err := os.Stat(directory); os.IsNotExist(err) {
@@ -128,11 +133,13 @@ func writeLogs(content string, directory string, pod corev1.Pod) {
 	_, err = file.WriteString(content)
 	handleError(err)
 
-	fmt.Printf("Created file %s\n", file.Name())
+	if verbose {
+		fmt.Printf("Created file %s\n", file.Name())
+	}
 }
 
 // processPodLogs handles streaming, reading, and saving logs for a single pod
-func processPodLogs(clientset *kubernetes.Clientset, namespace string, pod corev1.Pod, directory string) {
+func processPodLogs(clientset *kubernetes.Clientset, pod corev1.Pod) {
 	podLogOptions := corev1.PodLogOptions{}
 	req := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &podLogOptions)
 
@@ -149,5 +156,5 @@ func processPodLogs(clientset *kubernetes.Clientset, namespace string, pod corev
 	_, err = io.Copy(buf, logStream)
 	handleError(err)
 
-	writeLogs(buf.String(), directory, pod)
+	writeLogs(buf.String(), pod)
 }
