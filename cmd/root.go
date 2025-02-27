@@ -10,8 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// rootCmd represents the base command when called without any subcommands
-var rootCmd = &cobra.Command{
+// RootCmd represents the base command when called without any subcommands
+var RootCmd = &cobra.Command{
 	Use:   "salvo",
 	Short: "A CLI for getting Kubernetes logs fast",
 	Long: `Salvo is a CLI that uses your local machine's Kubernetes configuration
@@ -19,9 +19,9 @@ in order to write your pod logs to a directory for local inspection.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
+// This is called by main.main(). It only needs to happen once to the RootCmd.
 func Execute() {
-	err := rootCmd.Execute()
+	err := RootCmd.Execute()
 	if err != nil {
 		os.Exit(1)
 	}
@@ -29,5 +29,5 @@ func Execute() {
 
 func init() {
 	// Persistent flags
-	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Enable verbose output")
+	RootCmd.PersistentFlags().BoolP("verbose", "v", false, "Enable verbose output")
 }

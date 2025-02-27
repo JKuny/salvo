@@ -49,17 +49,28 @@ Or just write to the current directory with them writing to ./logs/<namespace>/.
 		verbose, _ = cmd.Flags().GetBool("verbose")
 
 		if verbose {
-			fmt.Printf("Using namespace \"%s\"\n", namespace)
-			fmt.Printf("Writing to directory \"%s\"\n", directory)
+			cmd.Printf("Using namespace \"%s\"\n", namespace)
+			cmd.Printf("Writing to directory \"%s\"\n", directory)
+		}
+
+		// Pass a logger function instead of directly referencing logsCmd
+		logger := func(format string, a ...interface{}) {
+			if verbose {
+				cmd.Printf(format, a...)
+			}
 		}
 
 		// Start grabbing Kubernetes information
-		getK8sInfo()
+		err := getK8sInfo(namespace, directory, logger)
+		if err != nil {
+			cmd.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
 	},
 }
 
 func init() {
-	rootCmd.AddCommand(logsCmd)
+	RootCmd.AddCommand(logsCmd)
 
 	// Setup any local flags
 	logsCmd.Flags().StringP(
@@ -73,88 +84,87 @@ func init() {
 		"The file path to write the logs to")
 }
 
-// handleError
-func handleError(err error) {
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
 // getK8sInfo Assembles the needed parts to get pod logs.
-func getK8sInfo() {
-	if verbose {
-		fmt.Printf("Getting Kubernetes pods for namespace %s\n", namespace)
-	}
+func getK8sInfo(namespace, directory string, logger func(string, ...interface{})) error {
+	logger("Getting Kubernetes pods for namespace %s\n", namespace)
+
 	userHomeDir, err := os.UserHomeDir()
-	handleError(err)
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %v", err)
+	}
 
 	kubeConfigPath := filepath.Join(userHomeDir, ".kube", "config")
-	if verbose {
-		fmt.Printf("Using kubeconfig: %s\n", kubeConfigPath)
-	}
+	logger("Using kubeconfig: %s\n", kubeConfigPath)
+
 	kubeConfig, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
-	handleError(err)
+	if err != nil {
+		return fmt.Errorf("failed to build kubeconfig: %v", err)
+	}
 
 	clientset, err := kubernetes.NewForConfig(kubeConfig)
-	handleError(err)
+	if err != nil {
+		return fmt.Errorf("failed to create Kubernetes clientset: %v", err)
+	}
 
 	pods, err := clientset.CoreV1().Pods(namespace).List(context.Background(), v1.ListOptions{})
-	handleError(err)
+	if err != nil {
+		return fmt.Errorf("failed to list pods in namespace %s: %v", namespace, err)
+	}
 
 	// Go through and write all the logs for the pods found
 	for _, pod := range pods.Items {
-		if verbose {
-			fmt.Printf("Pod name: %s\n", pod.Name)
+		logger("Pod name: %s\n", pod.Name)
+		if err := processPodLogs(clientset, pod, namespace, directory, logger); err != nil {
+			return fmt.Errorf("failed to process logs for pod %s: %v", pod.Name, err)
 		}
-		processPodLogs(clientset, pod)
 	}
-}
-
-// writeLogs write `.log` files to the directory targeted
-func writeLogs(content string, pod corev1.Pod) {
-	if verbose {
-		fmt.Printf("Writing files to directory %s\n", directory)
-	}
-
-	// Check if the directory exists before writing to it, created it if it doesn't
-	if _, err := os.Stat(directory); os.IsNotExist(err) {
-		err := os.MkdirAll(directory, 0755)
-		handleError(err)
-	}
-
-	file, err := os.Create(filepath.Join(directory, pod.Name+".log"))
-	handleError(err)
-	defer func(file *os.File) {
-		err := file.Close()
-		handleError(err)
-	}(file)
-
-	_, err = file.WriteString(content)
-	handleError(err)
-
-	if verbose {
-		fmt.Printf("Created file %s\n", file.Name())
-	}
+	return nil
 }
 
 // processPodLogs handles streaming, reading, and saving logs for a single pod
-func processPodLogs(clientset *kubernetes.Clientset, pod corev1.Pod) {
+func processPodLogs(clientset *kubernetes.Clientset, pod corev1.Pod, namespace, directory string, logger func(string, ...interface{})) error {
 	podLogOptions := corev1.PodLogOptions{}
 	req := clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, &podLogOptions)
 
 	// Stream logs
 	logStream, err := req.Stream(context.TODO())
-	handleError(err)
-	defer func(logStream io.ReadCloser) {
-		err := logStream.Close()
-		handleError(err)
-	}(logStream)
+	if err != nil {
+		return fmt.Errorf("failed to stream logs for pod %s: %v", pod.Name, err)
+	}
+	defer logStream.Close()
 
 	// Process logs
 	buf := new(bytes.Buffer)
 	_, err = io.Copy(buf, logStream)
-	handleError(err)
+	if err != nil {
+		return fmt.Errorf("failed to copy log stream for pod %s: %v", pod.Name, err)
+	}
 
-	writeLogs(buf.String(), pod)
+	return writeLogs(buf.String(), pod, directory, logger)
+}
+
+// writeLogs writes `.log` files to the directory targeted
+func writeLogs(content string, pod corev1.Pod, directory string, logger func(string, ...interface{})) error {
+	logger("Writing files to directory %s\n", directory)
+
+	// Check if the directory exists before writing to it, created it if it doesn't
+	if _, err := os.Stat(directory); os.IsNotExist(err) {
+		if err := os.MkdirAll(directory, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %v", directory, err)
+		}
+	}
+
+	file, err := os.Create(filepath.Join(directory, pod.Name+".log"))
+	if err != nil {
+		return fmt.Errorf("failed to create log file for pod %s: %v", pod.Name, err)
+	}
+	defer file.Close()
+
+	_, err = file.WriteString(content)
+	if err != nil {
+		return fmt.Errorf("failed to write to log file for pod %s: %v", pod.Name, err)
+	}
+
+	logger("Created file %s\n", file.Name())
+	return nil
 }
